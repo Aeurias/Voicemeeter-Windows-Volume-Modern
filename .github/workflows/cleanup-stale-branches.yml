@@ -1,0 +1,44 @@
+name: Remove temporary work branches
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Delete temporary branches
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          keep_memory_fix='agent/stop-audio-endpoint-refresh-churn'
+          keep_native_host='perf/native-low-memory-host'
+
+          mapfile -t branches < <(
+            git ls-remote --heads origin |
+              awk '{sub("refs/heads/", "", $2); print $2}' |
+              sort
+          )
+
+          for branch in "${branches[@]}"; do
+            if [[ "$branch" == "$keep_memory_fix" || "$branch" == "$keep_native_host" || "$branch" == "main" ]]; then
+              continue
+            fi
+
+            if [[ "$branch" == agent/* || "$branch" == 'perf/native-low-memory-squash-base' ]]; then
+              echo "Deleting $branch"
+              git push origin --delete "$branch" || true
+            fi
+          done
