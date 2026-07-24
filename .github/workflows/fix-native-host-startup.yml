@@ -1,0 +1,144 @@
+name: Fix native host startup
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    outputs:
+      patched_sha: ${{ steps.commit.outputs.sha }}
+    steps:
+      - name: Check out native-host branch
+        uses: actions/checkout@v4
+        with:
+          ref: perf/native-low-memory-host
+          fetch-depth: 0
+
+      - name: Fix WM_NCCREATE dispatch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('native/VMWV.NativeHost/src/main.cpp')
+          text = path.read_text(encoding='utf-8')
+          replacements = {
+              'return host->HandleMessage(message, wParam, lParam);':
+                  'return host->HandleMessage(window, message, wParam, lParam);',
+              'LRESULT HandleMessage(const UINT message, const WPARAM wParam, const LPARAM lParam)':
+                  'LRESULT HandleMessage(const HWND messageWindow, const UINT message, const WPARAM wParam, const LPARAM lParam)',
+              'return DefWindowProcW(window_, message, wParam, lParam);':
+                  'return DefWindowProcW(messageWindow, message, wParam, lParam);',
+          }
+
+          for old, new in replacements.items():
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'Expected exactly one occurrence of {old!r}, found {count}')
+              text = text.replace(old, new)
+
+          path.write_text(text, encoding='utf-8', newline='\n')
+          PY
+          git diff --check
+
+      - name: Commit patch
+        id: commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add native/VMWV.NativeHost/src/main.cpp
+          git commit -m "Fix native host window initialization"
+          git push origin HEAD:perf/native-low-memory-host
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: patch
+    runs-on: windows-2022
+    steps:
+      - name: Check out patched branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.patch.outputs.patched_sha }}
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Build release artifacts
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Create-ReleaseArtifacts.ps1 -Platform x64
+
+      - name: Verify native host starts
+        shell: pwsh
+        run: |
+          $hostPath = Resolve-Path artifacts/release/publish-win-x64/VMWV.NativeHost.exe
+          $process = Start-Process -FilePath $hostPath -ArgumentList '--background' -PassThru
+          try {
+            Start-Sleep -Seconds 5
+            if ($process.HasExited) {
+              throw "Native host exited during startup probe with code $($process.ExitCode)."
+            }
+          }
+          finally {
+            if (-not $process.HasExited) {
+              Stop-Process -Id $process.Id -Force
+            }
+          }
+
+      - name: Upload fixed installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: VMWV-native-low-memory-installer-x64-startup-fixed
+          path: artifacts/release/VoicemeeterWindowsVolumeModern-Setup-x64.msi
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  finalize:
+    needs: [patch, build]
+    if: always() && needs.patch.result == 'success' && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Squash native-host branch back to one commit
+        uses: actions/checkout@v4
+        with:
+          ref: perf/native-low-memory-host
+          fetch-depth: 0
+
+      - name: Create one clean commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin perf/stop-audio-endpoint-refresh-churn
+          git reset --soft origin/perf/stop-audio-endpoint-refresh-churn
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Move background sync to a low-memory native host"
+          git push --force origin HEAD:perf/native-low-memory-host
+
+      - name: Close maintenance PR and delete branch
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.pulls.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+              state: 'closed',
+            });
+            await github.rest.git.deleteRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: `heads/${context.payload.pull_request.head.ref}`,
+            });
