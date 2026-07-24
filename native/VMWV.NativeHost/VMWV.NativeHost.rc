@@ -2,4 +2,3 @@
 #include <windows.h>
 
 IDI_APP_ICON ICON "../VMWV.App/Assets/AppIcon.ico"
-1 RT_MANIFEST "app.manifest"
