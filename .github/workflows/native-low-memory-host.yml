@@ -1,6 +1,9 @@
 name: Native low-memory host
 
 on:
+  push:
+    branches:
+      - perf/native-low-memory-host
   pull_request:
     branches:
       - agent/stop-audio-endpoint-refresh-churn
