@@ -37,7 +37,7 @@ public:
     HRESULT STDMETHODCALLTYPE OnPropertyValueChanged(LPCWSTR deviceId, const PROPERTYKEY key) override;
 
 private:
-    ~AudioMonitor() override;
+    ~AudioMonitor();
 
     std::atomic<ULONG> references_{1};
     HWND window_ = nullptr;
