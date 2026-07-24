@@ -83,7 +83,15 @@ jobs:
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git commit -m "Move background sync to a low-memory native host"
-            git push --force-with-lease origin HEAD:perf/native-low-memory-host
+            if ($LASTEXITCODE -ne 0) {
+              throw "git commit failed with exit code $LASTEXITCODE"
+            }
+
+            $pushOutput = & git push --force origin HEAD:perf/native-low-memory-host 2>&1
+            $pushOutput | Out-String | Add-Content $diagnostic
+            if ($LASTEXITCODE -ne 0) {
+              throw "git push failed with exit code $LASTEXITCODE"
+            }
           }
           catch {
             ($_ | Out-String) | Add-Content $diagnostic
