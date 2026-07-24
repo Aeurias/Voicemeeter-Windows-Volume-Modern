@@ -1,0 +1,89 @@
+name: Native low-memory host
+
+on:
+  pull_request:
+    branches:
+      - agent/stop-audio-endpoint-refresh-churn
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-measure:
+    runs-on: windows-2022
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Configure native host
+        shell: pwsh
+        run: cmake -S native/VMWV.NativeHost -B artifacts/native-host -A x64
+
+      - name: Build native host
+        shell: pwsh
+        run: cmake --build artifacts/native-host --config Release
+
+      - name: Run native self-test
+        shell: pwsh
+        run: artifacts/native-host/Release/VMWV.NativeHost.exe --self-test
+
+      - name: Measure idle memory
+        shell: pwsh
+        run: |
+          $hostPath = Resolve-Path artifacts/native-host/Release/VMWV.NativeHost.exe
+          $process = Start-Process -FilePath $hostPath -ArgumentList '--background' -PassThru
+          try {
+            Start-Sleep -Seconds 10
+            $process.Refresh()
+            $workingSetMb = [Math]::Round($process.WorkingSet64 / 1MB, 2)
+            $privateMb = [Math]::Round($process.PrivateMemorySize64 / 1MB, 2)
+            "### Native host idle memory" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            "- Working set: **$workingSetMb MB**" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            "- Private bytes: **$privateMb MB**" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            Write-Host "Working set: $workingSetMb MB"
+            Write-Host "Private bytes: $privateMb MB"
+            if ($privateMb -gt 20) {
+              throw "Native host private memory exceeded the 20 MB regression ceiling."
+            }
+          }
+          finally {
+            if (-not $process.HasExited) {
+              Stop-Process -Id $process.Id -Force
+            }
+          }
+
+      - name: Build managed projects
+        shell: pwsh
+        run: |
+          dotnet build native/VMWV.Core/VMWV.Core.csproj -c Release
+          dotnet build native/VMWV.Infrastructure.Windows/VMWV.Infrastructure.Windows.csproj -c Release
+          dotnet build native/VMWV.App/VMWV.App.csproj -c Release -p:Platform=x64
+
+      - name: Publish test bundle
+        shell: pwsh
+        run: |
+          dotnet publish native/VMWV.App/VMWV.App.csproj `
+            -c Release `
+            -r win-x64 `
+            -p:Platform=x64 `
+            -p:WindowsPackageType=None `
+            -p:WindowsAppSDKSelfContained=true `
+            -p:SelfContained=true `
+            -p:PublishSingleFile=false `
+            -p:PublishTrimmed=false `
+            -o artifacts/test-bundle
+          Copy-Item artifacts/native-host/Release/VMWV.NativeHost.exe artifacts/test-bundle/VMWV.NativeHost.exe
+
+      - name: Upload test bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: VMWV-native-low-memory-x64
+          path: artifacts/test-bundle
+          compression-level: 0
+          retention-days: 7
