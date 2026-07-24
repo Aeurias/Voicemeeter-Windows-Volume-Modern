@@ -176,7 +176,7 @@ ULONG AudioMonitor::Release()
     return remaining;
 }
 
-HRESULT AudioMonitor::QueryInterface(const REFIID interfaceId, void** object)
+HRESULT AudioMonitor::QueryInterface(REFIID interfaceId, void** object)
 {
     if (object == nullptr)
     {
