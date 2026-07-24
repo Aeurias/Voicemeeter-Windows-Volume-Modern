@@ -1,0 +1,71 @@
+name: Apply native low-memory host
+
+on:
+  pull_request:
+    branches:
+      - perf/native-low-memory-host
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: windows-2022
+
+    steps:
+      - name: Check out implementation branch
+        uses: actions/checkout@v4
+        with:
+          ref: perf/native-low-memory-host
+          fetch-depth: 0
+
+      - name: Apply and squash implementation
+        shell: pwsh
+        run: |
+          if (-not (Test-Path .automation)) {
+            Write-Host "Implementation is already applied."
+            exit 0
+          }
+
+          $parts = Get-ChildItem .automation/native-low-memory-host.patch.gz.b64.part* | Sort-Object Name
+          if ($parts.Count -ne 6) {
+            throw "Expected 6 patch chunks, found $($parts.Count)."
+          }
+
+          $base64 = [string]::Concat(($parts | ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw }))
+          $compressed = [Convert]::FromBase64String($base64)
+          [IO.File]::WriteAllBytes("native-low-memory-host.patch.gz", $compressed)
+
+          $input = [IO.File]::OpenRead("native-low-memory-host.patch.gz")
+          $gzip = [IO.Compression.GzipStream]::new($input, [IO.Compression.CompressionMode]::Decompress)
+          $output = [IO.File]::Create("native-low-memory-host.patch")
+          try {
+            $gzip.CopyTo($output)
+          }
+          finally {
+            $output.Dispose()
+            $gzip.Dispose()
+            $input.Dispose()
+          }
+
+          git apply --index --whitespace=error-all native-low-memory-host.patch
+          if ($LASTEXITCODE -ne 0) {
+            throw "git apply failed"
+          }
+
+          Remove-Item .automation -Recurse -Force
+          Remove-Item native-low-memory-host.patch, native-low-memory-host.patch.gz -Force
+          git add -A
+
+          git fetch origin agent/stop-audio-endpoint-refresh-churn
+          git reset --soft origin/agent/stop-audio-endpoint-refresh-churn
+          git add -A
+          git diff --cached --check
+          if ($LASTEXITCODE -ne 0) {
+            throw "The generated change set failed git diff --check"
+          }
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Move background sync to a low-memory native host"
+          git push --force-with-lease origin HEAD:perf/native-low-memory-host
