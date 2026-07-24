@@ -71,25 +71,36 @@ jobs:
           dotnet build native/VMWV.Infrastructure.Windows/VMWV.Infrastructure.Windows.csproj -c Release
           dotnet build native/VMWV.App/VMWV.App.csproj -c Release -p:Platform=x64
 
-      - name: Publish x64 test bundle
+      - name: Create release artifacts
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Create-ReleaseArtifacts.ps1 -Platform x64
+
+      - name: Verify installer contents
         shell: pwsh
         run: |
-          dotnet publish native/VMWV.App/VMWV.App.csproj `
-            -c Release `
-            -r win-x64 `
-            -p:Platform=x64 `
-            -p:WindowsPackageType=None `
-            -p:WindowsAppSDKSelfContained=true `
-            -p:SelfContained=true `
-            -p:PublishSingleFile=false `
-            -p:PublishTrimmed=false `
-            -o artifacts/test-bundle
-          Copy-Item artifacts/native-host/Release/VMWV.NativeHost.exe artifacts/test-bundle/VMWV.NativeHost.exe
+          $msi = 'artifacts/release/VoicemeeterWindowsVolumeModern-Setup-x64.msi'
+          $hostExe = 'artifacts/release/publish-win-x64/VMWV.NativeHost.exe'
+          $settingsExe = 'artifacts/release/publish-win-x64/VMWV.App.exe'
+          foreach ($path in @($msi, $hostExe, $settingsExe)) {
+            if (-not (Test-Path $path)) {
+              throw "Expected release output missing: $path"
+            }
+          }
+          Get-Item $msi, $hostExe, $settingsExe | Select-Object Name, Length
 
       - name: Upload x64 test bundle
         uses: actions/upload-artifact@v4
         with:
           name: VMWV-native-low-memory-x64
-          path: artifacts/test-bundle
+          path: artifacts/release/publish-win-x64
+          compression-level: 0
+          retention-days: 7
+
+      - name: Upload x64 MSI installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: VMWV-native-low-memory-installer-x64
+          path: artifacts/release/VoicemeeterWindowsVolumeModern-Setup-x64.msi
+          if-no-files-found: error
           compression-level: 0
           retention-days: 7
