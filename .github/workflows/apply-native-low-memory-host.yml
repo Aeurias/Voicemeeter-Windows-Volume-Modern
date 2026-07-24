@@ -73,7 +73,8 @@ jobs:
             git fetch origin agent/stop-audio-endpoint-refresh-churn
             git reset --soft origin/agent/stop-audio-endpoint-refresh-churn
             git add -A
-            git diff --cached --check
+            $checkOutput = & git -c core.whitespace=cr-at-eol diff --cached --check 2>&1
+            $checkOutput | Out-String | Add-Content apply-diagnostic.txt
             if ($LASTEXITCODE -ne 0) {
               throw "The generated change set failed git diff --check"
             }
