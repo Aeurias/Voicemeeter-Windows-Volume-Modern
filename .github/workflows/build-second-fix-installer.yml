@@ -61,7 +61,7 @@ jobs:
 
           @'
           #define MyAppName "Voicemeeter Windows Volume Modern"
-          #define MyAppVersion "1.1.1-second-fix"
+          #define MyAppVersion "1.1.1 second fix"
           #define MyAppPublisher "heide-oficial"
           #define MyAppExeName "VMWV.App.exe"
 
@@ -80,15 +80,15 @@ jobs:
           Compression=lzma2/max
           SolidCompression=yes
           WizardStyle=modern
-          ArchitecturesAllowed=x64compatible
-          ArchitecturesInstallIn64BitMode=x64compatible
+          ArchitecturesAllowed=x64
+          ArchitecturesInstallIn64BitMode=x64
+          MinVersion=10.0.17763
           PrivilegesRequired=admin
           CloseApplications=yes
           RestartApplications=no
           VersionInfoVersion=1.1.1.2
           VersionInfoDescription={#MyAppName} second memory fix
           VersionInfoProductName={#MyAppName}
-          VersionInfoProductVersion={#MyAppVersion}
 
           [Languages]
           Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -107,7 +107,12 @@ jobs:
           Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
           '@ | Set-Content installer-second-fix.iss -Encoding utf8
 
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer-second-fix.iss
+          $log = "artifacts/installer/inno-build.log"
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer-second-fix.iss 2>&1 | Tee-Object -FilePath $log
+          if ($LASTEXITCODE -ne 0) {
+            Get-Content $log
+            throw "Inno Setup failed with exit code $LASTEXITCODE"
+          }
 
           $setup = "artifacts/installer/VoicemeeterWindowsVolumeModern-Setup-x64-second-fix.exe"
           if (-not (Test-Path $setup)) {
@@ -115,6 +120,15 @@ jobs:
           }
 
           Get-FileHash $setup -Algorithm SHA256 | Format-List
+
+      - name: Upload installer log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-build-log
+          path: artifacts/installer/inno-build.log
+          if-no-files-found: ignore
+          retention-days: 1
 
       - name: Upload installer
         uses: actions/upload-artifact@v4
