@@ -1,0 +1,126 @@
+name: Build second-fix installer
+
+on:
+  pull_request:
+    branches:
+      - agent/stop-audio-endpoint-refresh-churn
+
+permissions:
+  contents: read
+
+jobs:
+  build-installer:
+    runs-on: windows-2022
+
+    steps:
+      - name: Check out second-fix source
+        uses: actions/checkout@v4
+        with:
+          ref: agent/stop-audio-endpoint-refresh-churn
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Publish self-contained x64 app
+        shell: pwsh
+        run: |
+          dotnet publish native/VMWV.App/VMWV.App.csproj `
+            -c Release `
+            -r win-x64 `
+            -p:Platform=x64 `
+            -p:WindowsPackageType=None `
+            -p:WindowsAppSDKSelfContained=true `
+            -p:SelfContained=true `
+            -p:PublishSingleFile=false `
+            -p:PublishTrimmed=false `
+            -o artifacts/publish
+
+          if (-not (Test-Path artifacts/publish/VMWV.App.exe)) {
+            throw "Publish did not create VMWV.App.exe"
+          }
+
+          Copy-Item LICENSE artifacts/publish/LICENSE.txt -Force
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup --no-progress -y
+          }
+          if (-not (Test-Path $iscc)) {
+            throw "Inno Setup compiler was not found"
+          }
+
+      - name: Build setup executable
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifacts/installer | Out-Null
+
+          @'
+          #define MyAppName "Voicemeeter Windows Volume Modern"
+          #define MyAppVersion "1.1.1-second-fix"
+          #define MyAppPublisher "heide-oficial"
+          #define MyAppExeName "VMWV.App.exe"
+
+          [Setup]
+          AppId={{A8D3950A-7276-4B48-8D65-6C2C7D4267E8}
+          AppName={#MyAppName}
+          AppVersion={#MyAppVersion}
+          AppPublisher={#MyAppPublisher}
+          DefaultDirName={autopf}\Voicemeeter Windows Volume Modern
+          DefaultGroupName={#MyAppName}
+          DisableProgramGroupPage=yes
+          OutputDir=artifacts\installer
+          OutputBaseFilename=VoicemeeterWindowsVolumeModern-Setup-x64-second-fix
+          SetupIconFile=native\VMWV.App\Assets\AppIcon.ico
+          UninstallDisplayIcon={app}\{#MyAppExeName}
+          Compression=lzma2/max
+          SolidCompression=yes
+          WizardStyle=modern
+          ArchitecturesAllowed=x64compatible
+          ArchitecturesInstallIn64BitMode=x64compatible
+          PrivilegesRequired=admin
+          CloseApplications=yes
+          RestartApplications=no
+          VersionInfoVersion=1.1.1.2
+          VersionInfoDescription={#MyAppName} second memory fix
+          VersionInfoProductName={#MyAppName}
+          VersionInfoProductVersion={#MyAppVersion}
+
+          [Languages]
+          Name: "english"; MessagesFile: "compiler:Default.isl"
+
+          [Tasks]
+          Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
+
+          [Files]
+          Source: "artifacts\publish\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+          [Icons]
+          Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
+          Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+
+          [Run]
+          Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
+          '@ | Set-Content installer-second-fix.iss -Encoding utf8
+
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer-second-fix.iss
+
+          $setup = "artifacts/installer/VoicemeeterWindowsVolumeModern-Setup-x64-second-fix.exe"
+          if (-not (Test-Path $setup)) {
+            throw "Installer was not created"
+          }
+
+          Get-FileHash $setup -Algorithm SHA256 | Format-List
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: Voicemeeter-Windows-Volume-Modern-second-fix-installer-x64
+          path: artifacts/installer/VoicemeeterWindowsVolumeModern-Setup-x64-second-fix.exe
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
