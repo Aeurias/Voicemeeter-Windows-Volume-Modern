@@ -67,6 +67,9 @@ jobs:
               throw "git apply failed with exit code $LASTEXITCODE"
             }
 
+            # Workflow files cannot be pushed by the Actions token without workflow permission.
+            # The validation workflow is added directly after the source commit lands.
+            Remove-Item .github/workflows/native-low-memory-host.yml -Force
             Remove-Item .automation -Recurse -Force
             Remove-Item native-low-memory-host.patch, native-low-memory-host.patch.gz -Force
             git add -A
