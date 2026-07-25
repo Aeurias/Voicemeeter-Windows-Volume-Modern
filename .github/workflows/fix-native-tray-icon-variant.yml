@@ -1,9 +1,9 @@
 name: Clean up tray icon validation branch
 
 on:
-  pull_request:
+  push:
     branches:
-      - perf/native-low-memory-host
+      - perf/tray-icon-variant-build
 
 permissions:
   contents: write
