@@ -1,0 +1,243 @@
+name: Fix native tray icon live refresh
+
+on:
+  pull_request:
+    branches:
+      - perf/native-low-memory-host
+
+permissions:
+  contents: write
+
+jobs:
+  fix-build-squash:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: perf/native-low-memory-host
+          fetch-depth: 0
+
+      - name: Patch and verify native tray icon handling
+        shell: pwsh
+        run: |
+          @'
+          from pathlib import Path
+          import re
+
+          path = Path("native/VMWV.NativeHost/src/main.cpp")
+          text = path.read_text(encoding="utf-8")
+
+          maintenance_pattern = re.compile(
+              r"(?ms)^        case kMaintenanceTimer:\n"
+              r"            if \(settingsStore_\.ReloadIfChanged\(settings_\)\)\n"
+              r"            \{\n"
+              r"                SyncCurrentAudio\(\);\n"
+              r"            \}\n"
+              r"            TryConnectVoicemeeter\(false\);\n"
+              r"            break;"
+          )
+          maintenance_replacement = '''        case kMaintenanceTimer:
+              {
+                  const std::string previousLogoVariant = settings_.logoVariant;
+                  if (settingsStore_.ReloadIfChanged(settings_))
+                  {
+                      if (settings_.logoVariant != previousLogoVariant)
+                      {
+                          RefreshTrayIcon();
+                      }
+                      SyncCurrentAudio();
+                  }
+                  TryConnectVoicemeeter(false);
+                  break;
+              }'''
+          text, count = maintenance_pattern.subn(maintenance_replacement, text, count=1)
+          if count != 1:
+              raise SystemExit("failed to replace maintenance timer block")
+
+          helper = '''    HICON LoadTrayIcon()
+              {
+                  const wchar_t* fileName = L"logo.ico";
+                  if (settings_.logoVariant == "Black")
+                  {
+                      fileName = L"logo-black.ico";
+                  }
+                  else if (settings_.logoVariant == "White")
+                  {
+                      fileName = L"logo-white.ico";
+                  }
+
+                  const std::filesystem::path iconPath =
+                      std::filesystem::path(ExecutableDirectory()) / L"Assets" / L"Brand" / fileName;
+                  const HICON loaded = reinterpret_cast<HICON>(LoadImageW(
+                      nullptr,
+                      iconPath.c_str(),
+                      IMAGE_ICON,
+                      0,
+                      0,
+                      LR_LOADFROMFILE | LR_DEFAULTSIZE));
+                  if (loaded != nullptr)
+                  {
+                      ownsTrayIconHandle_ = true;
+                      return loaded;
+                  }
+
+                  ownsTrayIconHandle_ = false;
+                  return icon_;
+              }
+
+              void ReleaseTrayIconHandle()
+              {
+                  if (ownsTrayIconHandle_ && trayIconHandle_ != nullptr)
+                  {
+                      DestroyIcon(trayIconHandle_);
+                  }
+                  trayIconHandle_ = nullptr;
+                  ownsTrayIconHandle_ = false;
+              }
+
+              void RefreshTrayIcon()
+              {
+                  if (!trayVisible_)
+                  {
+                      return;
+                  }
+                  RemoveTrayIcon();
+                  AddTrayIcon();
+                  UpdateTrayTooltip();
+              }
+
+          '''
+          text, count = re.subn(r"(?m)^    void AddTrayIcon\(\)\n", helper + "    void AddTrayIcon()\n", text, count=1)
+          if count != 1:
+              raise SystemExit("failed to insert tray icon helpers")
+
+          text, count = re.subn(
+              r"(?m)^        trayIcon_ = \{\};$",
+              "        ReleaseTrayIconHandle();\n        trayIconHandle_ = LoadTrayIcon();\n        trayIcon_ = {};",
+              text,
+              count=1)
+          if count != 1:
+              raise SystemExit("failed to initialise dynamic tray icon handle")
+
+          text, count = re.subn(
+              r"(?m)^        trayIcon_\.hIcon = icon_;$",
+              "        trayIcon_.hIcon = trayIconHandle_;",
+              text,
+              count=1)
+          if count != 1:
+              raise SystemExit("failed to replace fixed tray icon assignment")
+
+          success_pattern = re.compile(
+              r"(?ms)(^        if \(trayVisible_\)\n"
+              r"        \{\n"
+              r"            trayIcon_\.uVersion = NOTIFYICON_VERSION_4;\n"
+              r"            Shell_NotifyIconW\(NIM_SETVERSION, &trayIcon_\);\n"
+              r"        \})"
+          )
+          text, count = success_pattern.subn(
+              r"\1\n        else\n        {\n            ReleaseTrayIconHandle();\n        }",
+              text,
+              count=1)
+          if count != 1:
+              raise SystemExit("failed to add tray icon load failure cleanup")
+
+          remove_pattern = re.compile(
+              r"(?ms)^    void RemoveTrayIcon\(\)\n"
+              r"    \{\n"
+              r"        if \(!trayVisible_\)\n"
+              r"        \{\n"
+              r"            return;\n"
+              r"        \}\n"
+              r"        Shell_NotifyIconW\(NIM_DELETE, &trayIcon_\);\n"
+              r"        trayVisible_ = false;\n"
+              r"    \}"
+          )
+          remove_replacement = '''    void RemoveTrayIcon()
+              {
+                  if (trayVisible_)
+                  {
+                      Shell_NotifyIconW(NIM_DELETE, &trayIcon_);
+                      trayVisible_ = false;
+                  }
+                  ReleaseTrayIconHandle();
+              }'''
+          text, count = remove_pattern.subn(remove_replacement, text, count=1)
+          if count != 1:
+              raise SystemExit("failed to replace tray icon cleanup")
+
+          checks = {
+              "variant reload": "const std::string previousLogoVariant = settings_.logoVariant;",
+              "icon loader": "HICON LoadTrayIcon()",
+              "black icon": 'fileName = L"logo-black.ico";',
+              "white icon": 'fileName = L"logo-white.ico";',
+              "dynamic assignment": "trayIcon_.hIcon = trayIconHandle_;",
+          }
+          for label, value in checks.items():
+              if value not in text:
+                  raise SystemExit(f"missing {label}: {value}")
+          if "trayIcon_.hIcon = icon_;" in text:
+              raise SystemExit("old fixed icon assignment remains")
+
+          path.write_text(text, encoding="utf-8", newline="\n")
+          '@ | python -
+
+          git diff --check
+          git grep -n "previousLogoVariant\|HICON LoadTrayIcon\|trayIcon_.hIcon = trayIconHandle_" -- native/VMWV.NativeHost/src/main.cpp
+
+      - name: Commit fix
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add native/VMWV.NativeHost/src/main.cpp
+          git commit -m "Apply icon variants to the native tray host"
+          git push origin HEAD:perf/native-low-memory-host
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Build release artifacts
+        shell: pwsh
+        run: ./scripts/Create-ReleaseArtifacts.ps1 -Platform x64
+
+      - name: Verify release payload and host startup
+        shell: pwsh
+        run: |
+          foreach ($name in @('logo.ico', 'logo-black.ico', 'logo-white.ico')) {
+            if (-not (Get-ChildItem artifacts -Recurse -File -Filter $name | Select-Object -First 1)) {
+              throw "$name missing from release"
+            }
+          }
+          $hostExe = Get-ChildItem artifacts -Recurse -File -Filter VMWV.NativeHost.exe | Select-Object -First 1
+          if (-not $hostExe) { throw "VMWV.NativeHost.exe was not produced" }
+          $process = Start-Process $hostExe.FullName -ArgumentList '--background' -PassThru
+          Start-Sleep -Seconds 5
+          if ($process.HasExited) { throw "Native host exited with $($process.ExitCode)" }
+          Stop-Process -Id $process.Id -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VMWV-native-low-memory-installer-x64-tray-icon-fixed
+          path: artifacts/release/VoicemeeterWindowsVolumeModern-Setup-x64.msi
+          if-no-files-found: error
+
+      - name: Squash and verify permanent branch
+        shell: pwsh
+        run: |
+          git fetch origin perf/stop-audio-endpoint-refresh-churn
+          $base = git rev-parse origin/perf/stop-audio-endpoint-refresh-churn
+          $tree = git rev-parse 'HEAD^{tree}'
+          $commit = git commit-tree $tree -p $base -m "Move background sync to a low-memory native host"
+          git push --force origin "$commit`:refs/heads/perf/native-low-memory-host"
+          git fetch --force origin perf/native-low-memory-host:refs/remotes/origin/perf/native-low-memory-host
+          $remote = git show origin/perf/native-low-memory-host:native/VMWV.NativeHost/src/main.cpp
+          if (-not ($remote | Select-String -SimpleMatch 'const std::string previousLogoVariant = settings_.logoVariant;' -Quiet)) { throw "remote variant reload missing" }
+          if (-not ($remote | Select-String -SimpleMatch 'HICON LoadTrayIcon()' -Quiet)) { throw "remote icon loader missing" }
+          if (-not ($remote | Select-String -SimpleMatch 'trayIcon_.hIcon = trayIconHandle_;' -Quiet)) { throw "remote dynamic icon assignment missing" }
+
+      - name: Delete temporary branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: gh api --method DELETE repos/Aeurias/Voicemeeter-Windows-Volume-Modern/git/refs/heads/perf/tray-icon-live-refresh-build
