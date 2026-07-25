@@ -1,0 +1,279 @@
+name: Fix native tray icon variant
+
+on:
+  pull_request:
+    branches:
+      - perf/native-low-memory-host
+
+permissions:
+  contents: write
+
+jobs:
+  patch-build-squash:
+    runs-on: windows-latest
+    steps:
+      - name: Check out native host branch
+        uses: actions/checkout@v4
+        with:
+          ref: perf/native-low-memory-host
+          fetch-depth: 0
+
+      - name: Apply tray icon variant support
+        shell: pwsh
+        run: |
+          @'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              file = Path(path)
+              text = file.read_text(encoding="utf-8")
+              if old not in text:
+                  raise SystemExit(f"Expected text not found in {path}: {old[:80]!r}")
+              file.write_text(text.replace(old, new, 1), encoding="utf-8", newline="\n")
+
+          replace_once(
+              "native/VMWV.NativeHost/src/settings.h",
+              '''    double gainMax = 12.0;
+              bool limitDbGainToZero = false;
+          ''',
+              '''    double gainMax = 12.0;
+              std::string logoVariant = "Color";
+              bool limitDbGainToZero = false;
+          ''')
+
+          replace_once(
+              "native/VMWV.NativeHost/src/settings.cpp",
+              '''    if (const auto value = GetNumber(text, "gain_max"))
+              {
+                  settings.gainMax = *value;
+              }
+              if (const auto value = GetBool(text, "limit_db_gain_to_0"))
+          ''',
+              '''    if (const auto value = GetNumber(text, "gain_max"))
+              {
+                  settings.gainMax = *value;
+              }
+              if (const auto value = GetString(text, "logo_variant", 0, text.size()))
+              {
+                  settings.logoVariant = *value == "Black" || *value == "White" ? *value : "Color";
+              }
+              if (const auto value = GetBool(text, "limit_db_gain_to_0"))
+          ''')
+
+          replace_once(
+              "native/VMWV.NativeHost/src/main.cpp",
+              '''    HICON icon_ = nullptr;
+              NOTIFYICONDATAW trayIcon_{};
+          ''',
+              '''    HICON icon_ = nullptr;
+              HICON trayIconHandle_ = nullptr;
+              bool ownsTrayIconHandle_ = false;
+              NOTIFYICONDATAW trayIcon_{};
+          ''')
+
+          replace_once(
+              "native/VMWV.NativeHost/src/main.cpp",
+              '''        case kMaintenanceTimer:
+                  if (settingsStore_.ReloadIfChanged(settings_))
+                  {
+                      SyncCurrentAudio();
+                  }
+                  TryConnectVoicemeeter(false);
+                  break;
+          ''',
+              '''        case kMaintenanceTimer:
+              {
+                  const std::string previousLogoVariant = settings_.logoVariant;
+                  if (settingsStore_.ReloadIfChanged(settings_))
+                  {
+                      if (settings_.logoVariant != previousLogoVariant)
+                      {
+                          RefreshTrayIcon();
+                      }
+                      SyncCurrentAudio();
+                  }
+                  TryConnectVoicemeeter(false);
+                  break;
+              }
+          ''')
+
+          replace_once(
+              "native/VMWV.NativeHost/src/main.cpp",
+              '''    void AddTrayIcon()
+              {
+                  if (trayVisible_ || window_ == nullptr)
+                  {
+                      return;
+                  }
+
+                  trayIcon_ = {};
+                  trayIcon_.cbSize = sizeof(trayIcon_);
+                  trayIcon_.hWnd = window_;
+                  trayIcon_.uID = kTrayIconId;
+                  trayIcon_.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+                  trayIcon_.uCallbackMessage = WM_VMWV_TRAY;
+                  trayIcon_.hIcon = icon_;
+                  StringCchCopyW(trayIcon_.szTip, ARRAYSIZE(trayIcon_.szTip), kAppName);
+                  trayVisible_ = Shell_NotifyIconW(NIM_ADD, &trayIcon_) != FALSE;
+                  if (trayVisible_)
+                  {
+                      trayIcon_.uVersion = NOTIFYICON_VERSION_4;
+                      Shell_NotifyIconW(NIM_SETVERSION, &trayIcon_);
+                  }
+              }
+
+              void RemoveTrayIcon()
+              {
+                  if (!trayVisible_)
+                  {
+                      return;
+                  }
+                  Shell_NotifyIconW(NIM_DELETE, &trayIcon_);
+                  trayVisible_ = false;
+              }
+          ''',
+              '''    HICON LoadTrayIcon()
+              {
+                  const wchar_t* fileName = L"logo.ico";
+                  if (settings_.logoVariant == "Black")
+                  {
+                      fileName = L"logo-black.ico";
+                  }
+                  else if (settings_.logoVariant == "White")
+                  {
+                      fileName = L"logo-white.ico";
+                  }
+
+                  const std::filesystem::path iconPath =
+                      std::filesystem::path(ExecutableDirectory()) / L"Assets" / L"Brand" / fileName;
+                  const HICON loaded = reinterpret_cast<HICON>(LoadImageW(
+                      nullptr,
+                      iconPath.c_str(),
+                      IMAGE_ICON,
+                      0,
+                      0,
+                      LR_LOADFROMFILE | LR_DEFAULTSIZE));
+                  if (loaded != nullptr)
+                  {
+                      ownsTrayIconHandle_ = true;
+                      return loaded;
+                  }
+
+                  ownsTrayIconHandle_ = false;
+                  return icon_;
+              }
+
+              void ReleaseTrayIconHandle()
+              {
+                  if (ownsTrayIconHandle_ && trayIconHandle_ != nullptr)
+                  {
+                      DestroyIcon(trayIconHandle_);
+                  }
+                  trayIconHandle_ = nullptr;
+                  ownsTrayIconHandle_ = false;
+              }
+
+              void RefreshTrayIcon()
+              {
+                  if (!trayVisible_)
+                  {
+                      return;
+                  }
+                  RemoveTrayIcon();
+                  AddTrayIcon();
+                  UpdateTrayTooltip();
+              }
+
+              void AddTrayIcon()
+              {
+                  if (trayVisible_ || window_ == nullptr)
+                  {
+                      return;
+                  }
+
+                  ReleaseTrayIconHandle();
+                  trayIconHandle_ = LoadTrayIcon();
+                  trayIcon_ = {};
+                  trayIcon_.cbSize = sizeof(trayIcon_);
+                  trayIcon_.hWnd = window_;
+                  trayIcon_.uID = kTrayIconId;
+                  trayIcon_.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+                  trayIcon_.uCallbackMessage = WM_VMWV_TRAY;
+                  trayIcon_.hIcon = trayIconHandle_;
+                  StringCchCopyW(trayIcon_.szTip, ARRAYSIZE(trayIcon_.szTip), kAppName);
+                  trayVisible_ = Shell_NotifyIconW(NIM_ADD, &trayIcon_) != FALSE;
+                  if (trayVisible_)
+                  {
+                      trayIcon_.uVersion = NOTIFYICON_VERSION_4;
+                      Shell_NotifyIconW(NIM_SETVERSION, &trayIcon_);
+                  }
+                  else
+                  {
+                      ReleaseTrayIconHandle();
+                  }
+              }
+
+              void RemoveTrayIcon()
+              {
+                  if (trayVisible_)
+                  {
+                      Shell_NotifyIconW(NIM_DELETE, &trayIcon_);
+                      trayVisible_ = false;
+                  }
+                  ReleaseTrayIconHandle();
+              }
+          ''')
+          '@ | python -
+
+          git diff --check
+          git diff -- native/VMWV.NativeHost/src/main.cpp native/VMWV.NativeHost/src/settings.cpp native/VMWV.NativeHost/src/settings.h
+
+      - name: Commit tray icon fix
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add native/VMWV.NativeHost/src/main.cpp native/VMWV.NativeHost/src/settings.cpp native/VMWV.NativeHost/src/settings.h
+          git commit -m "Apply the selected icon variant to the native tray host"
+          git push origin HEAD:perf/native-low-memory-host
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Build release artifacts
+        shell: pwsh
+        run: ./scripts/Create-ReleaseArtifacts.ps1 -Platform x64
+
+      - name: Verify host and icon assets
+        shell: pwsh
+        run: |
+          $hostExe = Get-ChildItem artifacts -Recurse -File -Filter VMWV.NativeHost.exe | Select-Object -First 1
+          if (-not $hostExe) { throw "VMWV.NativeHost.exe was not produced" }
+
+          foreach ($name in @('logo.ico', 'logo-black.ico', 'logo-white.ico')) {
+            $icon = Get-ChildItem artifacts -Recurse -File -Filter $name | Select-Object -First 1
+            if (-not $icon) { throw "$name was not included in the release payload" }
+          }
+
+          $process = Start-Process $hostExe.FullName -ArgumentList '--background' -PassThru
+          Start-Sleep -Seconds 5
+          if ($process.HasExited) { throw "Native host exited during startup probe with code $($process.ExitCode)" }
+          Stop-Process -Id $process.Id -Force
+
+      - name: Upload corrected installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: VMWV-native-low-memory-installer-x64-icon-variant-fixed
+          path: artifacts/release/VoicemeeterWindowsVolumeModern-Setup-x64.msi
+          if-no-files-found: error
+
+      - name: Squash native host branch to one commit
+        shell: pwsh
+        run: |
+          git fetch origin perf/stop-audio-endpoint-refresh-churn
+          $base = git rev-parse origin/perf/stop-audio-endpoint-refresh-churn
+          $tree = git rev-parse 'HEAD^{tree}'
+          $commit = git commit-tree $tree -p $base -m "Move background sync to a low-memory native host"
+          git push --force origin "$commit`:refs/heads/perf/native-low-memory-host"
