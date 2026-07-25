@@ -242,10 +242,15 @@ jobs:
           git push --force origin "$commit`:refs/heads/perf/native-low-memory-host"
           git fetch --force origin perf/native-low-memory-host:refs/remotes/origin/perf/native-low-memory-host
           $remoteSource = git show origin/perf/native-low-memory-host:native/VMWV.NativeHost/src/main.cpp
-          $remoteSource | Select-String -SimpleMatch 'const std::string previousLogoVariant = settings_.logoVariant;' | Out-Null
-          $remoteSource | Select-String -SimpleMatch 'HICON LoadTrayIcon()' | Out-Null
-          $remoteSource | Select-String -SimpleMatch 'trayIcon_.hIcon = trayIconHandle_;' | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw "Remote branch verification failed" }
+          foreach ($required in @(
+            'const std::string previousLogoVariant = settings_.logoVariant;',
+            'HICON LoadTrayIcon()',
+            'trayIcon_.hIcon = trayIconHandle_;'
+          )) {
+            if (-not ($remoteSource | Select-String -SimpleMatch $required -Quiet)) {
+              throw "Remote branch is missing required source: $required"
+            }
+          }
 
       - name: Delete temporary branch
         env:
